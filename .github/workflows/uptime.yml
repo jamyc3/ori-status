@@ -1,0 +1,108 @@
+name: uptime
+# External uptime monitor for Ori + Jot production surfaces.
+# Runs every ~5 minutes (GitHub cron can lag a few minutes under load).
+# On failure: GitHub emails the repo owner a "Run failed" notification AND an
+# incident issue is opened (watchers of the repo get notified of issues too).
+# On recovery: the open incident issue is commented + closed automatically.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_fail:
+        description: 'Force a failure to test the alert path'
+        required: false
+        default: 'false'
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Probe production
+        run: |
+          set -u
+          FAIL=0
+          REPORT=""
+
+          check () {
+            local name="$1" url="$2" pattern="${3:-}"
+            local body code ok=0
+            for attempt in 1 2 3; do
+              body=$(curl -sS -m 20 "$url" 2>&1) && code=$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$url" 2>/dev/null) || code="000"
+              if [ "$code" = "200" ] && { [ -z "$pattern" ] || echo "$body" | grep -qE "$pattern"; }; then
+                ok=1; break
+              fi
+              sleep 10
+            done
+            if [ "$ok" = "1" ]; then
+              REPORT="$REPORT
+          ✅ $name — 200 OK"
+            else
+              REPORT="$REPORT
+          🔴 $name — HTTP $code after 3 attempts — $(echo "$body" | head -c 160 | tr '\n' ' ')"
+              FAIL=1
+            fi
+          }
+
+          # Every visible number/claim maps to a real check:
+          check "Ori app (talk-to-me root serves the SPA)"   "https://talk-to-me.ideaflow.page/"              'index-[A-Za-z0-9_-]+\.js'
+          check "Ori API health (/proxy/health ok|degraded)" "https://talk-to-me.ideaflow.page/proxy/health"  '"status":"(ok|degraded)"'
+          check "Ori marketing site"                         "https://ori-app.ideaflow.page/"                 ''
+          check "Jot website"                                "https://jot-transcribe.com/"                    ''
+
+          if [ "${{ github.event.inputs.force_fail || 'false' }}" = "true" ]; then
+            REPORT="$REPORT
+          🔴 FORCED TEST FAILURE — this is a drill, production was not checked as down"
+            FAIL=1
+          fi
+
+          echo "$REPORT"
+          echo "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$REPORT" > /tmp/report.txt
+          echo "FAIL=$FAIL" >> "$GITHUB_ENV"
+          # don't exit yet — the issue steps below need to run first
+
+      - name: Open / update incident issue
+        if: env.FAIL == '1'
+        run: |
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Ori/Jot production incident in:title" --json number --jq '.[0].number // empty')
+          body="Automated uptime probe failed at $(date -u +'%Y-%m-%d %H:%M UTC').
+
+          $(cat /tmp/report.txt)
+
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Triage: ssh to the VPS, \`cortex-runports\` status for port 3004, and check the ideaflow gateway."
+          if [ -z "$existing" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "🔴 Ori/Jot production incident — $(date -u +'%Y-%m-%d %H:%M UTC')" \
+              --body "$body"
+          else
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          fi
+
+      - name: Close incident on recovery
+        if: env.FAIL == '0'
+        run: |
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Ori/Jot production incident in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "✅ Recovered — all checks passing at $(date -u +'%Y-%m-%d %H:%M UTC').
+
+          $(cat /tmp/report.txt)"
+            gh issue close "$existing" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Fail the run so GitHub sends the notification email
+        if: env.FAIL == '1'
+        run: exit 1
