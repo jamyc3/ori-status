@@ -1,8 +1,17 @@
 # ori-status
 
 External uptime monitor for **Ori** and **Jot** production surfaces, running on GitHub
-Actions every ~5 minutes. No third-party service, no account, no secrets — it only
-probes public URLs.
+Actions. No third-party service, no account, no secrets — it only probes public URLs.
+
+**How often it really runs:** GitHub throttles scheduled workflows heavily on free
+public repos — in practice the schedule fires every ~1–4 hours, not every 5 minutes.
+To compensate, each fired run probes in a **rolling window**: one probe cycle every
+~5 minutes for up to ~45 minutes, and a newly fired run cancels the previous one
+(cancelled runs in the history are normal takeovers, not problems). Failures alert
+immediately mid-window. Net effect: real 5-minute granularity *while a window is
+open*, with blind gaps between windows when GitHub delays the schedule. For true
+always-on 5-minute coverage, add an external pinger (e.g. UptimeRobot free tier, or
+a cron on the VPS) and keep this as the second opinion.
 
 ## What it checks
 | Check | URL | Passes when |
@@ -23,8 +32,16 @@ Each check retries 3× (10 s apart) before failing, so a single blip doesn't pag
    subscribe by watching the repo from their GitHub account.
 
 ## Test the alert path
-Actions → `uptime` → Run workflow → set `force_fail` = `true`. You'll get the failure
-email + a test incident issue (auto-closed by the next green run).
+Actions → `uptime` → Run workflow → set `force_fail` = `true` (and `cycles` = `1` so
+the test finishes fast). You'll get the failure email + a test incident issue
+(auto-closed by the next green run).
+
+## Infra flakes
+GitHub occasionally fails a run before any step executes ("job was not acquired by
+runner"). `rerun-flakes.yml` detects that signature (zero steps executed) and retries
+the run once — real probe failures are never auto-retried. The "Run failed" email for
+the flaky attempt still arrives (GitHub sends it before the retry can happen); if the
+run is green when you click through, it was a flake.
 
 ## Why this exists
 The in-app watchdog writes Gmail *drafts* (its connector can't send), and its cloud

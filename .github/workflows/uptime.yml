@@ -1,19 +1,31 @@
 name: uptime
 # External uptime monitor for Ori + Jot production surfaces.
-# Runs every ~5 minutes (GitHub cron can lag a few minutes under load).
-# On failure: GitHub emails the repo owner a "Run failed" notification AND an
-# incident issue is opened (watchers of the repo get notified of issues too).
-# On recovery: the open incident issue is commented + closed automatically.
+#
+# GitHub throttles scheduled workflows heavily (observed: fires every ~1-4 h,
+# not every 5 min), so a single probe per run leaves long blind gaps. Instead,
+# each fired run probes every ~5 minutes for up to ~45 minutes (9 cycles) and
+# a newly fired run cancels the previous one (concurrency below), so coverage
+# is a rolling window rather than a point check.
+#
+# On failure: the loop stops immediately, an incident issue is opened
+# (watchers get notified) and the run fails so GitHub emails the owner.
+# On recovery: the next green run comments on + closes the incident issue.
+# Runner-acquisition flakes (job never starts) are auto-retried by
+# rerun-flakes.yml.
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '2-57/5 * * * *'
   workflow_dispatch:
     inputs:
       force_fail:
         description: 'Force a failure to test the alert path'
         required: false
         default: 'false'
+      cycles:
+        description: 'Probe cycles this run (5 min apart); default 9'
+        required: false
+        default: '9'
 
 permissions:
   issues: write
@@ -21,20 +33,21 @@ permissions:
 
 concurrency:
   group: uptime
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 58
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Probe production
+      - name: Probe production (rolling 5-min cycles)
         run: |
           set -u
+          CYCLES="${{ github.event.inputs.cycles || '9' }}"
+          case "$CYCLES" in (*[!0-9]*|'') CYCLES=9;; esac
           FAIL=0
-          REPORT=""
 
           check () {
             local name="$1" url="$2" pattern="${3:-}"
@@ -56,21 +69,31 @@ jobs:
             fi
           }
 
-          # Every visible number/claim maps to a real check:
-          check "Ori app (talk-to-me root serves the SPA)"   "https://talk-to-me.ideaflow.page/"              'index-[A-Za-z0-9_-]+\.js'
-          check "Ori API health (/proxy/health ok|degraded)" "https://talk-to-me.ideaflow.page/proxy/health"  '"status":"(ok|degraded)"'
-          check "Ori marketing site"                         "https://ori-app.ideaflow.page/"                 ''
-          check "Jot website"                                "https://jot-transcribe.com/"                    ''
+          for cycle in $(seq 1 "$CYCLES"); do
+            REPORT="cycle $cycle/$CYCLES at $(date -u +'%H:%M UTC')"
 
-          if [ "${{ github.event.inputs.force_fail || 'false' }}" = "true" ]; then
-            REPORT="$REPORT
+            # Every visible number/claim maps to a real check:
+            check "Ori app (talk-to-me root serves the SPA)"   "https://talk-to-me.ideaflow.page/"              'index-[A-Za-z0-9_-]+\.js'
+            check "Ori API health (/proxy/health ok|degraded)" "https://talk-to-me.ideaflow.page/proxy/health"  '"status":"(ok|degraded)"'
+            check "Ori marketing site"                         "https://ori-app.ideaflow.page/"                 ''
+            check "Jot website"                                "https://jot-transcribe.com/"                    ''
+
+            if [ "${{ github.event.inputs.force_fail || 'false' }}" = "true" ]; then
+              REPORT="$REPORT
           🔴 FORCED TEST FAILURE — this is a drill, production was not checked as down"
-            FAIL=1
-          fi
+              FAIL=1
+            fi
 
-          echo "$REPORT"
-          echo "$REPORT" >> "$GITHUB_STEP_SUMMARY"
-          printf '%s\n' "$REPORT" > /tmp/report.txt
+            echo "$REPORT"
+            echo "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$REPORT" > /tmp/report.txt
+
+            # Alert immediately on the first failing cycle instead of
+            # finishing the window.
+            [ "$FAIL" = "1" ] && break
+            [ "$cycle" -lt "$CYCLES" ] && sleep 290
+          done
+
           echo "FAIL=$FAIL" >> "$GITHUB_ENV"
           # don't exit yet — the issue steps below need to run first
 
