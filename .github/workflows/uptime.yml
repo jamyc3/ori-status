@@ -75,7 +75,6 @@ jobs:
             # Every visible number/claim maps to a real check:
             check "Ori app (talk-to-me root serves the SPA)"   "https://talk-to-me.ideaflow.page/"              'index-[A-Za-z0-9_-]+\.js'
             check "Ori API health (/proxy/health ok|degraded)" "https://talk-to-me.ideaflow.page/proxy/health"  '"status":"(ok|degraded)"'
-            check "Ori marketing site"                         "https://ori-app.ideaflow.page/"                 ''
             check "Jot website"                                "https://jot-transcribe.com/"                    ''
 
             if [ "${{ github.event.inputs.force_fail || 'false' }}" = "true" ]; then

@@ -18,7 +18,6 @@ a cron on the VPS) and keep this as the second opinion.
 |---|---|---|
 | Ori app | `talk-to-me.ideaflow.page/` | 200 + SPA bundle (`index-*.js`) served |
 | Ori API health | `talk-to-me.ideaflow.page/proxy/health` | 200 + `status` is `ok` or `degraded` |
-| Ori marketing site | `ori-app.ideaflow.page/` | 200 |
 | Jot website | `jot-transcribe.com/` | 200 |
 
 Each check retries 3× (10 s apart) before failing, so a single blip doesn't page anyone.
