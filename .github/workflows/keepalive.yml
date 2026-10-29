@@ -29,4 +29,6 @@ jobs:
       - name: Re-enable the uptime schedule in case it was already switched off
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow enable uptime --repo "$GITHUB_REPOSITORY"
+        # The API call is idempotent; `gh workflow enable <name>` only resolves
+        # workflows that are already disabled and errors otherwise.
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/uptime.yml/enable"
