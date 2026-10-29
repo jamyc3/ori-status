@@ -1,0 +1,32 @@
+name: keepalive
+# GitHub switches off every scheduled workflow after 60 days without a commit
+# in the repo. That silently disabled uptime.yml on 2026-10-21 and nothing
+# probed production for five days. This commits a timestamp once a month so
+# the repo always has recent activity and the uptime schedule stays on.
+
+on:
+  schedule:
+    - cron: '17 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit a timestamp so the repo counts as active
+        run: |
+          date -u +%FT%TZ > .keepalive
+          git config user.name "ori-status keepalive"
+          git config user.email "actions@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "keepalive: $(cat .keepalive)"
+          git push
+      - name: Re-enable the uptime schedule in case it was already switched off
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable uptime --repo "$GITHUB_REPOSITORY"
